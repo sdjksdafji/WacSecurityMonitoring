@@ -1,0 +1,28 @@
+﻿//Script GUID:271c0db1-6a80-4206-b991-865708041d2e
+//Used for tracking history
+
+
+REFERENCE @"/local/shuywang/Ref/PopSecurity.dll";
+REFERENCE @"/local/shuywang/Ref/PopSecurityUdo.dll";
+REFERENCE @"/local/shuywang/Ref/ScopeInfra.dll";
+
+USING Microsoft.PopSecurity.Utils;
+
+#DECLARE msftSubnets string = "/local/shuywang/MsftOwnedSubnets.log";
+
+// select Microsoft-owned subnets
+msftSubnets =
+    EXTRACT
+        subnet
+    FROM @msftSubnets
+    USING DefaultTextExtractor;
+
+// expand Microsoft subnets into individual addresses
+msftAddresses =
+    PROCESS msftSubnets
+    PRODUCE IP
+    USING IPCIDRExpander("subnet");
+
+OUTPUT msftAddresses
+TO SSTREAM "/local/shuywang/test.ss"
+WITH STREAMEXPIRY "100";

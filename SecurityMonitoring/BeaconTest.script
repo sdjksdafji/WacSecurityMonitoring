@@ -1,0 +1,281 @@
+﻿//Script GUID:76f9941f-74a3-4314-8bfc-427f435829fc
+//Used for tracking history
+
+event400Stream =
+    SSTREAM @"/local/shuywang/Event400.ss";
+
+procs =
+    SSTREAM @"/local/shuywang/Event610.ss";
+
+REFERENCE @"/local/shuywang/Ref/PopSecurity.dll";
+REFERENCE @"/local/shuywang/Ref/PopSecurityUdo.dll";
+REFERENCE @"/local/shuywang/Ref/ScopeInfra.dll";
+
+USING Microsoft.PopSecurity.Utils;
+
+
+
+
+// ----------------------------------------------------------
+#DECLARE msftSubnets string = "/local/shuywang/MsftOwnedSubnets.log";
+
+// select Microsoft-owned subnets
+msftSubnets =
+    EXTRACT
+        subnet
+    FROM @msftSubnets
+    USING DefaultTextExtractor;
+
+// expand Microsoft subnets into individual addresses
+msftAddresses =
+    PROCESS msftSubnets
+    PRODUCE IP
+    USING IPCIDRExpander("subnet");
+
+// expand the schema into first-class columns
+[LOWDISTINCTNESS(Port)]
+beaconExpanded =
+    SELECT 
+        //SPOEnvironment, we dont' have this column
+        Machine,
+        TimeStamp,
+        DestAddress AS IP,
+        DestPort AS Port,
+        (DestDnsLookUp == "Unknown" ? DestAddress : DestDnsLookUp) AS Domain,
+        Double.Parse(PeriodicityAverage) AS IntervalAverage,
+        ProcessID AS ProcessId
+    FROM event400Stream
+    HAVING NOT String.IsNullOrEmpty(ProcessId);
+
+// enrich the rows with MSFT IP info
+[LOWDISTINCTNESS(Port)]
+beaconExpanded =
+    SELECT 
+        e.Machine,
+        e.TimeStamp,
+        e.IP,
+        m.IP AS MsftIP,
+        e.Port,
+        e.Domain,
+        e.IntervalAverage,
+        e.ProcessId
+    FROM beaconExpanded AS e
+    LEFT OUTER JOIN msftAddresses AS m
+    ON e.IP == m.IP;
+
+
+
+// expand the list of domains associated with a given IP
+destinations =
+    SELECT
+        IP,
+        DomainList AS Domain
+    FROM beaconExpanded
+    CROSS APPLY Domain.Split(',') AS DomainList;
+
+// select the distinct domains associated with each IP
+destinations =
+    SELECT DISTINCT
+        IP,
+        Domain
+    FROM destinations;
+
+// zip the domains into a canonical list for each IP
+destinations =
+    SELECT
+        IP,
+        String.Join(";", LIST(Domain).ToArray()) AS Domain
+    FROM destinations;
+
+// rejoin IPs with the canonical domain list
+[LOWDISTINCTNESS(Port)]
+beaconExpanded =
+    SELECT 
+        e.Machine,
+        e.TimeStamp,
+        e.IP,
+        e.MsftIP,
+        e.Port,
+        d.Domain,
+        e.IntervalAverage,
+        e.ProcessId
+    FROM beaconExpanded AS e
+    LEFT OUTER JOIN destinations AS d
+    ON e.IP == d.IP;
+
+
+// join proc start info with the beacon data
+[LOWDISTINCTNESS(Port)]
+beaconExpanded =
+    SELECT 
+        e.Machine,
+        e.TimeStamp,
+        e.IP,
+        e.MsftIP,
+        e.Port,
+        e.Domain,
+        e.IntervalAverage,
+        e.ProcessId,
+        ((TimeSpan)(e.TimeStamp - p.TimeStamp)).TotalMilliseconds AS TargetDeltaTime,
+        p.ImagePath,
+        p.ParentProcessId,
+        p.CommandLine AS ProcessName,
+        p.CommandLine
+    FROM beaconExpanded AS e
+    LEFT OUTER JOIN procs AS p
+        ON  e.Machine == p.Machine
+        AND e.ProcessId == p.ProcessId
+    WHERE (p.TimeStamp != NULL) AND (e.TimeStamp != NULL)
+    HAVING TargetDeltaTime >= 0;
+
+[LOWDISTINCTNESS(Port)]
+[LOWDISTINCTNESS(TargetRank)]
+beaconExpanded =
+    SELECT
+        Machine,
+        TimeStamp,
+        IP,
+        MsftIP,
+        Port,
+        Domain,
+        IntervalAverage,
+        ProcessId,
+        TargetDeltaTime,
+        ProcessName,
+        ParentProcessId,
+        CommandLine,
+        ROW_NUMBER() OVER (PARTITION BY TimeStamp, Machine, IP, Port, ProcessId ORDER BY TargetDeltaTime ASC) AS TargetRank
+    FROM beaconExpanded
+    HAVING TargetRank == 1;
+
+
+[LOWDISTINCTNESS(Port)]
+beaconInstances =
+    SELECT
+        Machine,
+        IP,
+        MsftIP,
+        Port,
+        ProcessName,
+        MIN(IntervalAverage) AS MinIntervalAverage,
+        MAX(IntervalAverage) AS MaxIntervalAverage,
+        MIN(TimeStamp) AS FirstSeen,
+        MAX(TimeStamp) AS LastSeen,
+        COUNT() AS BeaconCount,
+        Domain
+    FROM beaconExpanded
+    GROUP BY Machine, IP, MsftIP, Port, Domain, ProcessName;
+
+
+// Join MSFT address beacons against internal subnets and remove beacons that are within the environment
+beaconsMsft =
+    SELECT
+           b.Machine,
+           b.IP,
+           b.MsftIP,
+           b.Port,
+           b.ProcessName,
+           b.MinIntervalAverage,
+           b.MaxIntervalAverage,
+           b.FirstSeen,
+           b.LastSeen,
+           b.BeaconCount,
+           b.Domain
+    FROM beaconInstances AS b
+    WHERE NOT MsftIP == NULL;    // only operate on beacons where the destination was a MSFT address
+
+// Remove the InternalIP column and whitelist processes
+beaconsMsft =
+    SELECT
+        Machine,
+        IP,
+        MsftIP,
+        Port,
+        ProcessName,
+        MinIntervalAverage,
+        MaxIntervalAverage,
+        FirstSeen,
+        LastSeen,
+        BeaconCount,
+        Domain
+    FROM beaconsMsft
+    WHERE NOT ANY(
+        Domain.EndsWith(@".microsoft.com"),
+        Domain.EndsWith(@"be.cosmos11.osdinfra.net"),
+        Domain.EndsWith(@"cosmos11.osdinfra.net"),
+        Domain.EndsWith(@"management.core.windows.net"),
+        Domain.EndsWith(@"database.windows.net"),
+        Domain.EndsWith(@"database.secure.windows.net"),
+        Domain.EndsWith(@"queue.core.windows.net"),
+        Domain.EndsWith(@"blob.core.windows.net"),
+        Domain.EndsWith(@"login.windows.net"),
+        Domain.EndsWith(@"graph.windows.net"),
+        Domain.EndsWith(@"accounts.accesscontrol.windows.net"),
+        Domain.EndsWith(@".trafficmanager.net"),
+        Domain.EndsWith(@"workflow.windows.net"),
+        Domain.EndsWith(@"outlook.office365.com"),
+        Domain.EndsWith(@"dprod.msft.net"),
+        Domain.EndsWith(@".sharepointonline.com"),
+        Domain.EndsWith(@".microsoftonline.com"),
+        Domain.EndsWith(@".sponetwork.com"),
+        Domain.Contains(@".bing.com"),
+        Domain.EndsWith(@"blob.core.usgovcloudapi.net"),
+        Domain.EndsWith(@".outlook.com"),
+        Domain.EndsWith(@".systemcenteradvisor.com"),
+        Domain.EndsWith(@"ods.opinsights.azure.com"),
+        Domain.EndsWith(@".ad.msft.net"),
+        Domain.EndsWith(@"ocsp.msocsp.com"),
+        Domain.EndsWith(@"officeapps.live.com"),
+        Domain.EndsWith(@"officeapps-df.live.com"),
+        Domain.EndsWith(@".akadns.net"),
+        Domain.EndsWith(@"syncservice.ccsctp.com"),
+        Domain.EndsWith(@"bn1swesecman102.swe.prd.msft.net"),
+        Domain.EndsWith(@".ppe.windows.net"),
+        Domain.EndsWith(@".windows-ppe.net"),
+        Domain.EndsWith(@".servicebus.windows.net"),
+        Domain.Contains(@"login.microsoftonline.com")
+    ) AND NOT ANY(
+        ProcessName.StartsWith(@"c:\program files\common files\microsoft shared\web server extensions\16\bin\owstimer.exe", true, null),
+        ProcessName.StartsWith(@"c:\windows\system32\inetsrv\w3wp.exe", true, null),
+        ProcessName.StartsWith(@"c:\windows\system32\inetsrv\inetinfo.exe", true, null), //?
+////        ProcessName == @"c:\windows\system32\wsmprovhost.exe", // DO NOT WHITELIST
+////        ProcessName == @"c:\windows\system32\windowspowershell\v1.0\powershell.exe", // DO NOT WHITELIST
+//        // ICM 5164091: only proc names are available in some cases
+////        ProcessName == @"wsmprovhost.exe", // DO NOT WHITELIST
+        ProcessName.StartsWith(@"owstimer.exe", true, null),
+        ProcessName.StartsWith(@"w3wp.exe", true, null)
+    );
+
+// beacons where the destination IP is external to MSFT
+beaconsExternal =
+    SELECT *
+    FROM beaconInstances
+    WHERE (MsftIP == NULL)
+        AND NOT ANY(
+            Domain.EndsWith(@"cdp1.public-trust.com"),
+            Domain.EndsWith(@"cdn.sharepointonline.com"),
+            Domain.EndsWith(@".akamaiedge.net"),
+            Domain.EndsWith(@"ocsp.msocsp.com"),
+            Domain.EndsWith(@"aadcdn.microsoftonline-p.com") // akamai
+        )
+        AND NOT ANY(
+            ProcessName.StartsWith(@"c:\program files\microsoft\exchange server\v15\bin\microsoft.exchange.diagnostics.service.exe", true, null),
+            ProcessName.StartsWith(@"c:\program files\tenable\nessus\nessusd.exe", true, null),
+            ProcessName.StartsWith(@"c:\program files\system center 2012\operations manager\server\monitoringhost.exe", true, null),
+            ProcessName.StartsWith(@"c:\windows\system32\svchost.exe", true, null),
+            ProcessName.StartsWith(@"c:\windows\system32\inetsrv\inetinfo.exe", true, null),
+            ProcessName.StartsWith(@"c:\windows\system32\inetsrv\w3wp.exe", true, null),
+            ProcessName.StartsWith(@"c:\program files\common files\microsoft shared\web server extensions\16\bin\owstimer.exe", true, null),
+            // ICM 5164091: only proc names are available in some cases
+            ProcessName.StartsWith(@"w3wp.exe", true, null),
+            ProcessName.StartsWith(@"owstimer.exe", true, null)
+        );
+
+beacons =
+    SELECT * FROM beaconsMsft
+    UNION ALL
+    SELECT * FROM beaconsExternal;
+
+OUTPUT beacons
+TO SSTREAM "/local/shuywang/Beacon.ss"
+WITH STREAMEXPIRY "100";

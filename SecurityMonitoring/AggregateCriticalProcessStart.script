@@ -1,0 +1,249 @@
+﻿//Script GUID:43aa1192-37e7-4ac4-ae52-f5ce6b6fc42c
+//Used for tracking history
+
+procStarts =
+    SSTREAM @"/local/shuywang/Event610.ss";
+
+REFERENCE @"/local/shuywang/Ref/PopSecurity.dll";
+REFERENCE @"/local/shuywang/Ref/PopSecurityUdo.dll";
+REFERENCE @"/local/shuywang/Ref/ScopeInfra.dll";
+
+#DECLARE inputProcessBlacklist string = @"/local/shuywang/Ref/processBlacklist.log";
+
+USING Microsoft.PopSecurity;
+USING Microsoft.PopSecurity.Utils;
+USING Microsoft.PopSecurity.Events;
+USING Microsoft.PopSecurity.Topology;
+
+
+// read blacklist
+[ROWCOUNT=1000]
+processBlacklist =
+    EXTRACT ProcessName:string
+    FROM @inputProcessBlacklist
+    USING DefaultTextExtractor();
+
+netProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ALL(ANY(CommandLine.Contains("/user"),
+                  CommandLine.Contains("/add")),
+              ANY(CommandLine.Contains("net.exe"),
+                  CommandLine.Contains("net1.exe"))
+             )
+          AND NOT (!String.IsNullOrEmpty(UserName) &&
+                   UserName.ToLowerInvariant() == "_spofileconveyor" &&
+                   CommandLine.Contains(@"\\spoops\spobuilds\fileconveyor") &&
+                   CommandLine.Contains(@"/user:phx\_spofileconveyor"))
+          AND NOT (CommandLine.Contains("localgroup \"event log readers\" /add") &&
+                   ANY(CommandLine.Contains("gmlamproxy"),
+                       CommandLine.Contains("_spolamproxy")))
+          AND NOT (CommandLine == @"c:\windows\system32\net.exe localgroup administrators _spoffttelemetry /add")
+          AND NOT (CommandLine.Contains("_spoafsvc"))
+          AND NOT (CommandLine.Contains(@"\globalreadonly\") &&
+                   CommandLine.EndsWith("dfrreadonlyaccount"))
+          AND NOT CommandLine.Contains("localgroup administrators ops_fte_usa")
+          AND NOT (CommandLine.Contains("localgroup administrators _spoffttelemetry"))
+          AND NOT (CommandLine.Contains(@"localgroup administrators ylo001\_spoafsvc"));
+          
+
+// auditpol used to disable auditing
+auditpolProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ALL(CommandLine.Contains("auditpol"),
+              CommandLine.Contains("disable"));
+
+// scheduled task creation
+schedTaskProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ALL(CommandLine.Contains("schtasks"),
+              ANY(CommandLine.Contains("/create"),
+                  CommandLine.Contains("/change"))
+             )
+          AND NOT (ANY(CommandLine.Contains(@"/change /enable /tn \fft\gather-dailygriddata_gatherer"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-dailyusagedata_gatherer"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-hourlyactivemonitoringdata"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-hourlyautofftdata"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-hourlygriddata_gatherer"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-hourlyusagedata_gatherer"),
+                       CommandLine.Contains(@"/change /enable /tn \fft\gather-minutelyusagedata_gatherer"))
+          )
+          AND NOT CommandLine.EndsWith(@"/create /tn switchodlrunasaccountduringpeakhournonpeakhourcutoff /xml ""c:\program files\microsoft\datacenter\datamining\officedataloader\switchodlaccounttaskcreationconfig.xml"" /f")
+          AND NOT (CommandLine.Contains("deletelamproxyaccountkey") &&
+                   CommandLine.Contains("deleteregistrykey.ps1"))
+          AND NOT (CommandLine.Contains("iislogpurger"))
+          AND NOT (ANY(CommandLine.Contains(@"c:\patch-infrastructure.ps1"), 
+                       CommandLine.Contains(@"c:\pavc\patch-hotfix.ps1")) &&
+                   ANY(CommandLine.Contains("pavc - one time hotfix patch"),
+                       CommandLine.Contains("pavc - one time wsus patch")))
+          AND NOT (CommandLine.Contains(@"c:\map\utils\iislogpurger\purgeiislog.ps1"))
+          AND NOT (CommandLine.Contains(@"c:\grid\app\backuptoazure"))
+          AND NOT (CommandLine.Contains(@"datatransfermonitortask") || CommandLine.Contains(@"datatransferhandlertask"))
+          AND NOT (CommandLine.Contains(@"autopavnessusimportjob"));
+
+// firewall rule modification
+firewallProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ALL(CommandLine.Contains("netsh"),
+              CommandLine.Contains("firewall"))
+          AND NOT ANY(UserName == "_SPOSecurityScan",
+                      UserName == "_SpoSecurityScan",
+                      UserName == "_SPOPAVC_Scan")
+          AND NOT ALL(UserName.EndsWith("$"),
+                      CommandLine.Contains("nessus_"))
+          AND NOT ALL(CommandLine.Contains("operations manager tcp inbound and outbound"))
+          AND NOT (CommandLine.Contains("advfirewall show allprofiles"));
+
+// psexec with -s (run as system)
+psexecProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ALL(CommandLine.Contains("psexec"),
+              CommandLine.Contains("-s"));
+
+// gsecdump, temp exe file
+g64 = SELECT * FROM procStarts WHERE ImagePath.StartsWith("g64", false, null);
+
+// process names specified in enrichment file
+blacklistedProcStarts =
+    SELECT *
+    FROM procStarts AS p
+    LEFT SEMIJOIN processBlacklist AS b
+    ON p.ImagePath == b.ProcessName
+    WHERE NOT (ImagePath == "whoami.exe");
+
+blacklistedProcStarts =
+    SELECT *
+    FROM blacklistedProcStarts
+    UNION ALL
+    SELECT *
+    FROM g64
+    UNION ALL
+    SELECT *
+    FROM netProcStarts
+    UNION ALL
+    SELECT *
+    FROM psexecProcStarts
+    UNION ALL
+    SELECT *
+    FROM auditpolProcStarts
+    UNION ALL
+    SELECT *
+    FROM schedTaskProcStarts
+    UNION ALL
+    SELECT *
+    FROM firewallProcStarts;
+
+blacklistedProcStartsAgg = SELECT
+        CosmosUtils.MakeMinuteBucket(TimeStamp, 15) AS TimeStamp,
+        ImagePath,
+        UserName,
+        Machine,
+        CommandLine,
+        COUNT() AS EventCount
+FROM blacklistedProcStarts;
+
+OUTPUT blacklistedProcStartsAgg
+TO SSTREAM "/local/shuywang/blacklistedProcStartsAgg.ss"
+WITH STREAMEXPIRY "100";
+
+
+OUTPUT blacklistedProcStarts
+TO SSTREAM "/local/shuywang/blacklistedProcStarts.ss"
+WITH STREAMEXPIRY "100";
+
+
+
+//     _                ____             _ 
+//    / \   _ __  _ __ |  _ \ ___   ___ | |
+//   / _ \ | '_ \| '_ \| |_) / _ \ / _ \| |
+//  / ___ \| |_) | |_) |  __/ (_) | (_) | |
+// /_/   \_\ .__/| .__/|_|   \___/ \___/|_|
+//         |_|   |_|                       
+appPoolProcStarts =
+    SELECT *
+    FROM procStarts
+    WHERE ImagePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft Office Servers\16.0\Bin\Microsoft.Office.Project.Server.Queuing.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft Office Servers\16.0\Bin\Microsoft.Office.Project.Server.Calculation.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft Office Servers\16.0\Bin\Microsoft.Office.Project.Server.Eventing.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft Office Servers\16.0\Bin\schedengine.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft Office Servers\16.0\WebServices\ConversionServices\TranslationServicesWorker.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\BIN\VideoThumbnailer.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Common Files\microsoft shared\Web Server Extensions\16\BIN\VideoThumbnailer.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Common Files\Microsoft Shared\Web Server Extensions\16\BIN\CsiSrvExe.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Common Files\microsoft shared\Web Server Extensions\16\BIN\CsiSrvExe.exe")
+          AND NOT ImagePath.Contains(@"C:\Program Files\Microsoft SQL Server\110\LocalDB\Binn\sqlservr.exe")
+          AND NOT ImagePath.Contains(@"C:\serverprof\servertree.exe")
+          AND NOT ImagePath.Contains(@"C:\serverprof\serverprofsetup.exe")
+          AND NOT ImagePath.Contains(@"C:\officeprofiler\offskew64.exe")
+          AND NOT ImagePath.Contains(@"C:\officeprofiler\offtree64.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v2.0.50727\dw20.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v2.0.50727\csc.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v2.0.50727\cvtres.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v3.5\csc.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v3.5\cvtres.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\cvtres.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework\v2.0.50727\csc.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework\v2.0.50727\cvtres.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\vbc.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\System32\WerFault.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\System32\ceiprole.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\System32\wermgr.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\System32\inetsrv\w3wp.exe")
+          AND NOT ImagePath.Contains(@"C:\Windows\System32\conhost.exe")
+          // ICM 5164091: HostIDS process starts only contain the proc name, not the full path
+          AND NOT ImagePath.Contains(@"conhost.exe")
+          AND NOT ImagePath.Contains(@"csc.exe")
+          AND NOT ImagePath.Contains(@"CsiSrvExe.exe")
+          AND NOT ImagePath.Contains(@"cvtres.exe")
+          AND NOT ImagePath.Contains(@"Microsoft.Office.Project.Server.Calculation.exe")
+          AND NOT ImagePath.Contains(@"Microsoft.Office.Project.Server.Eventing.exe")
+          AND NOT ImagePath.Contains(@"Microsoft.Office.Project.Server.Queuing.exe")
+          AND NOT ImagePath.Contains(@"schedengine.exe")
+          AND NOT ImagePath.Contains(@"sqlservr.exe")
+          AND NOT ImagePath.Contains(@"vbc.exe")
+          AND NOT ImagePath.Contains(@"VideoThumbnailer.exe")
+          AND NOT ImagePath.Contains(@"w3wp.exe")
+          AND NOT ImagePath.Contains(@"WerFault.exe")
+          AND NOT ImagePath.Contains(@"wermgr.exe")
+          AND NOT ImagePath.Contains(@"TranslationServicesWorker.exe)")
+                 ;
+
+appPoolProcStartsAgg = SELECT
+           ImagePath,
+           UserName,
+           Machine,
+           CommandLine,
+           COUNT() AS EventCount
+FROM appPoolProcStarts;
+
+OUTPUT appPoolProcStartsAgg
+TO SSTREAM "/local/shuywang/appPoolProcStartsAgg.ss"
+WITH STREAMEXPIRY "100";
+
+OUTPUT appPoolProcStarts
+TO SSTREAM "/local/shuywang/appPoolProcStarts.ss"
+WITH STREAMEXPIRY "100";
+
+//logonIds =
+//  SELECT SPOEnvironment,
+//         MachineName,
+//         Int64.Parse(LogonId) AS LogonId
+//  FROM blacklistedProcStarts
+//  WHERE NOT String.IsNullOrEmpty(LogonId)
+//  UNION
+//  SELECT SPOEnvironment,
+//         MachineName,
+//         Int64.Parse(LogonId) AS LogonId
+//  FROM appPoolProcStarts
+//  WHERE NOT String.IsNullOrEmpty(LogonId);
+//
+//OUTPUT logonIds 
+//TO SSTREAM "/local/shuywang/LoginIds.ss"
+//WITH STREAMEXPIRY "100";
+

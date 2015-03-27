@@ -1,0 +1,26 @@
+﻿//Script GUID:49a79db4-6b76-4a6f-a682-6227b0e090ee
+//Used for tracking history
+eventLogStream =
+    SSTREAM @"/local/shuywang/OneWeekHostIDSEvents.ss";
+
+rs1 =
+    SELECT *,
+        Helper.formatEvent610(EventData, 0) AS IP,
+        Helper.formatEvent610(EventData, 1) AS Port,
+        Helper.formatEvent610(EventData, 2) AS DnsLookUp,
+        Helper.formatEvent610(EventData, 3) AS BytesTransferred,
+        Helper.formatEvent610(EventData, 4) AS EventCount,
+        Helper.formatEvent610(EventData, 5) AS FirstSeen,
+        Helper.formatEvent610(EventData, 6) AS LastSeen,
+        Helper.formatEvent610(EventData, 7) AS ProcessInstanceId,
+        Helper.formatEvent610(EventData, 8) AS ProcessId,
+        Helper.formatEvent610(EventData, 9) AS ParentProcessId,
+        Helper.formatEvent610(EventData, 10) AS ImagePath,
+        Helper.formatEvent610(EventData, 11) AS SID
+    FROM eventLogStream
+    //WHERE EventID == 400 AND Description.Contains("beacon");  AND 
+    WHERE Source == "HostIDS" AND EventID == 710;
+
+OUTPUT rs1
+TO SSTREAM "/local/shuywang/Event710.ss"
+WITH STREAMEXPIRY "100";

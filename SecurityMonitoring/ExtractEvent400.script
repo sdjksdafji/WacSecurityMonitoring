@@ -1,0 +1,21 @@
+﻿//Script GUID:a608b81f-9aa6-4821-b6af-d99e0741501a
+//Used for tracking history
+eventLogStream =
+    SSTREAM @"/local/shuywang/OneWeekHostIDSEvents.ss";
+
+rs1 =
+    SELECT *,
+        Helper.formatEvent610(EventData, 0) AS DestAddress,
+        Helper.formatEvent610(EventData, 1) AS DestPort,
+        Helper.formatEvent610(EventData, 2) AS DestDnsLookUp,
+        Helper.formatEvent610(EventData, 3) AS PeriodicityAverage,
+        Helper.formatEvent610(EventData, 4) AS PeriodicityVariance,
+        Helper.formatEvent610(EventData, 5) AS ProcessID,
+        Helper.formatEvent610(EventData, 6) AS SID
+    FROM eventLogStream
+    //WHERE EventID == 400 AND Description.Contains("beacon");  AND 
+    WHERE Source == "HostIDS" AND EventID == 400;
+
+OUTPUT rs1
+TO SSTREAM "/local/shuywang/Event400.ss"
+WITH STREAMEXPIRY "100";

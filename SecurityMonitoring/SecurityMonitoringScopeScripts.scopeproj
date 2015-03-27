@@ -1,0 +1,72 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>601d9273-c221-48f2-8ad2-edd06a9decbf</ProjectGuid>
+    <OutputType>File</OutputType>
+    <AssemblyName>Algebra.xml</AssemblyName>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <Name>SecurityMonitoringScopeScripts</Name>
+    <RootNamespace>ScopeApplication1</RootNamespace>
+    <VCSelectionInProjectProperty>&lt;Use Current VC in VC Selector&gt;</VCSelectionInProjectProperty>
+    <CosmosRuntimeVersion>Default</CosmosRuntimeVersion>
+    <ScopePath>%24(SCRIPT_DIR);%24(CLUSTER_ROOT);%24(SCOPE_DIR);%24(PROJECT_DIR)</ScopePath>
+    <InputStreamSearchPath>%24(PROJECT_DIR);%24(SCRIPT_DIR);%24(CLUSTER_ROOT)</InputStreamSearchPath>
+    <OutputStreamPath>%24(PROJECT_DIR)</OutputStreamPath>
+    <VertexDebugSolution>false</VertexDebugSolution>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\Debug\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>false</DebugSymbols>
+    <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Script Include="AggregateCriticalProcessStart.script" />
+    <Script Include="AggregateEncodedCommands.script" />
+    <Script Include="AggregateHostIDSExfil.script" />
+    <Script Include="BeaconTest.script" />
+    <Script Include="ExtractEvent400.script" />
+    <Script Include="ExtractEvent610.script" />
+    <Script Include="ExtractEvent710.script" />
+    <Script Include="Scope.script" />
+    <Script Include="Test.script" />
+    <ScriptCode Include="AggregateCriticalProcessStart.script.cs">
+      <DependentUpon>AggregateCriticalProcessStart.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="AggregateEncodedCommands.script.cs">
+      <DependentUpon>AggregateEncodedCommands.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="AggregateHostIDSExfil.script.cs">
+      <DependentUpon>AggregateHostIDSExfil.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="BeaconTest.script.cs">
+      <DependentUpon>BeaconTest.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="ExtractEvent400.script.cs">
+      <DependentUpon>ExtractEvent400.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="ExtractEvent610.script.cs">
+      <DependentUpon>ExtractEvent610.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="ExtractEvent710.script.cs">
+      <DependentUpon>ExtractEvent710.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="Scope.script.cs">
+      <DependentUpon>Scope.script</DependentUpon>
+    </ScriptCode>
+    <ScriptCode Include="Test.script.cs">
+      <DependentUpon>Test.script</DependentUpon>
+    </ScriptCode>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="PopSecurity.dll">
+      <SubType>Content</SubType>
+    </Content>
+  </ItemGroup>
+  <Import Project="$(AppData)\Microsoft\ScopeStudio\MsBuild\1.0\Scope.targets" />
+</Project>

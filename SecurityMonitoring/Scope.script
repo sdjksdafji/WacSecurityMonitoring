@@ -1,0 +1,33 @@
+﻿eventLogStream =
+    SSTREAM @"shares/WacStructured.test/local/structured/EventLogs/?date=2015-03-01...2015-03-07";
+// @"/shares/WacStructured.test/local/structured/EventLogs/2015/03/EventLogs_2015_03_01.ss";
+
+rs1 =
+    SELECT *
+    FROM eventLogStream
+    //WHERE EventID == 400 AND Description.Contains("beacon");  AND 
+    WHERE Source == "HostIDS" AND (
+        EventID == 100 OR
+        EventID == 150 OR
+        EventID == 170 OR
+        EventID == 200 OR
+        EventID == 300 OR
+        EventID == 400 OR
+        EventID == 500 OR
+        EventID == 600 OR
+        EventID == 610 OR
+        EventID == 611 OR
+        EventID == 700 OR
+        EventID == 710 OR
+        EventID == 800 OR
+        EventID == 801 OR
+        EventID == 802 OR
+        EventID == 900 OR
+        EventID == 1000 OR
+        EventID == 1100 OR
+        EventID == 1500
+);
+
+OUTPUT rs1
+TO SSTREAM "/local/shuywang/OneWeekHostIDSEvents.ss"
+WITH STREAMEXPIRY "100";

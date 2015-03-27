@@ -1,0 +1,130 @@
+﻿//Script GUID:74060d6c-403e-44f3-85e1-6a51157ef102
+//Used for tracking history
+
+procs =
+    SSTREAM @"/local/shuywang/Event610.ss";
+
+//REFERENCE @"/local/shuywang/Ref/PopSecurity.dll";
+//REFERENCE @"/local/shuywang/Ref/PopSecurityUdo.dll";
+//REFERENCE @"/local/shuywang/Ref/ScopeInfra.dll";
+
+//USING Microsoft.PopSecurity.Utils;
+
+
+encodedCommand =
+    SELECT *,
+           CommandLine.Length AS Length
+    FROM procs
+    WHERE (CommandLine != null) AND (
+        CommandLine.ToLowerInvariant().Contains("encodedcommand") OR
+        CommandLine.ToLowerInvariant().Contains("invoke-expression") OR
+        CommandLine.ToLowerInvariant().Contains("webclient"));
+
+encodedCommand =
+    SELECT *,
+        DecodeEncodedCommand(CommandLine) AS Decoded
+    FROM encodedCommand;
+
+
+stats =
+    SELECT 
+           Length,
+           COUNT(*) OVER (PARTITION BY Length, UserName, ImagePath) AS Count,
+           UserName,
+           Machine,
+           ImagePath,
+           CommandLine,
+           Decoded,
+           ROW_NUMBER() OVER (PARTITION BY Length, UserName, ImagePath ORDER BY TimeStamp) AS Index
+    FROM encodedCommand
+    HAVING Index == 1;
+
+decoded =
+    SELECT 
+           Length,
+           Count,
+           UserName,
+           Machine,
+           ImagePath,
+           Decoded,
+           CommandLine
+    FROM stats;
+
+
+
+OUTPUT decoded
+TO SSTREAM "/local/shuywang/DecodecCommands.ss"
+WITH STREAMEXPIRY "100";
+
+// Reports
+dangerouscommands = SELECT
+            Machine,
+            MachineIP,
+            EventID,
+            TimeStamp,
+            User,
+            UserName,
+            ProcessId,
+            ImagePath,
+            ParentProcessId,
+            CommandLine,
+            Decoded
+        FROM encodedCommand
+WHERE 
+    Decoded.ToLowerInvariant().Contains("invoke-expression") OR
+    Decoded.ToLowerInvariant().Contains("webclient") OR
+    Decoded.ToLowerInvariant().Contains("frombase64") OR
+    Decoded.ToLowerInvariant().Contains("memorystream");
+
+
+OUTPUT dangerouscommands
+TO SSTREAM "/local/shuywang/DangerousCommands.ss"
+WITH STREAMEXPIRY "100";
+
+
+
+#CS
+
+public static string DecodeEncodedCommand(string cmdline)
+{
+    var tokens = cmdline.Split(new []{' '}, StringSplitOptions.RemoveEmptyEntries);
+    
+    string base64 = string.Empty;
+    for(int i =0; i< tokens.Length; i++)
+    {
+        if(tokens[i].Equals("-encodedcommand",StringComparison.OrdinalIgnoreCase))
+        {
+            if(tokens.Length > i+1)
+            {
+                base64 = tokens[i+1];
+            }
+            break;
+        }
+    }
+    
+    base64 = base64.Trim('"');
+
+    int lastBlock = base64.Length % 4;
+
+    if(lastBlock == 1)
+    {
+        base64 = base64.Substring(0, base64.Length -1);
+    }
+    else if( lastBlock == 2)
+    {
+        base64 += "==";
+    }
+    else if( lastBlock == 3)
+    {
+        base64 += "=";
+    }
+    else
+    {
+        // already the correct size
+    }  
+    
+    byte[] decoded = Convert.FromBase64String(base64);
+    return System.Text.Encoding.Unicode.GetString(decoded).Replace("\r\n", " ");
+}
+
+#ENDCS

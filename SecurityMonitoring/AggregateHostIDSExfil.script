@@ -1,0 +1,194 @@
+﻿//Script GUID:d1c3a4c0-b6b6-454a-9a87-afa1e8fa16a1
+//Used for tracking history
+
+#DECLARE singleMachineProcessIPExfilThresholdBytes long = 50000000;
+#DECLARE aggregatedPerEnvironmentProcessIPExfilThresholdBytes long = 100000000;
+
+#DECLARE msftSubnetsFile string = "/local/shuywang/Ref/MsftOwnedSubnets.log";
+
+netflowRaw =
+    SSTREAM @"/local/shuywang/Event710.ss";
+
+
+REFERENCE @"/local/shuywang/Ref/PopSecurity.dll";
+REFERENCE @"/local/shuywang/Ref/PopSecurityUdo.dll";
+REFERENCE @"/local/shuywang/Ref/ScopeInfra.dll";
+
+USING Microsoft.PopSecurity.Utils;
+
+
+netflowRaw = SELECT *,
+       TimeStamp.ToShortDateString() AS Date
+FROM netflowRaw;
+
+msftSubnets =
+    EXTRACT
+        subnet
+    FROM @msftSubnetsFile
+    USING DefaultTextExtractor;
+
+
+// expand Microsoft subnets into individual addresses
+msftAddresses =
+    PROCESS msftSubnets
+    PRODUCE IP
+    USING IPCIDRExpander("subnet");
+
+
+netflowExpanded =
+    SELECT 
+        e.*,
+        m.IP AS MsftIP
+    FROM netflowRaw AS e
+    LEFT OUTER JOIN msftAddresses AS m
+    ON e.IP == m.IP;
+
+// expand the list of domains associated with a given IP
+destinations =
+    SELECT
+        IP,
+        DomainList AS Domain
+    FROM netflowExpanded
+    CROSS APPLY DnsLookUp.Split(',') AS DomainList;
+
+
+// select the distinct domains associated with each IP
+destinations =
+    SELECT DISTINCT
+        IP,
+        Domain
+    FROM destinations;
+
+// zip the domains into a canonical list for each IP
+destinations =
+    SELECT
+        IP,
+        String.Join(",", LIST(Domain).ToArray()) AS Domain
+    FROM destinations;
+
+
+netflowExpanded =
+    SELECT 
+        e.*,
+        d.Domain
+    FROM netflowExpanded AS e
+    LEFT OUTER JOIN destinations AS d
+    ON e.IP == d.IP;
+
+
+// select machine-proc-port-ip tuples that exfil'ed >threshold in a given day
+exfilProcsPerMachine =
+    SELECT 
+        Date,
+        Machine,
+        ImagePath,
+        IP,
+        FIRST(MsftIP) AS MsftIP,
+        Port,
+        SUM(Convert.ToInt64(BytesTransferred)) AS TotalProcessBytes,
+        FIRST(Domain) AS Domain
+    FROM netflowExpanded
+    WHERE NOT String.IsNullOrEmpty(ImagePath)
+    GROUP BY Date, Machine, ImagePath, IP, Port
+    HAVING TotalProcessBytes > @singleMachineProcessIPExfilThresholdBytes;
+
+// select env-proc-port-ip tuples that exfil'ed >threshold in a given day
+exfilProcsPerEnv =
+    SELECT 
+        Date,
+        FIRST("Aggregated") AS Machine,
+        ImagePath,
+        IP,
+        FIRST(MsftIP) AS MsftIP,
+        Port,
+        SUM(Convert.ToInt64(BytesTransferred)) AS TotalProcessBytes,
+        FIRST(Domain) AS Domain
+    FROM netflowExpanded
+    WHERE NOT String.IsNullOrEmpty(ImagePath)
+    GROUP BY Date, ImagePath, IP, Port
+    HAVING TotalProcessBytes > @aggregatedPerEnvironmentProcessIPExfilThresholdBytes;
+
+exfilProcs =
+    SELECT * FROM exfilProcsPerMachine
+    UNION ALL
+    SELECT * FROM exfilProcsPerEnv;
+
+
+// Join MSFT address exfil against internal subnets and remove exfil that is within the environment
+exfilProcsMsft =
+    SELECT *
+    FROM exfilProcs AS e
+    WHERE NOT MsftIP == NULL;     // only operate on exfil where the destination was a MSFT address
+
+// Remove the InternalIP column and whitelist
+exfilProcsMsft =
+    SELECT
+        Date,
+        Machine,
+        ImagePath,
+        IP,
+        MsftIP,
+        Port,
+        TotalProcessBytes,
+        Domain
+    FROM exfilProcsMsft
+    WHERE NOT ANY(
+            Domain.EndsWith(@"watson.telemetry.microsoft.com"),
+            Domain.EndsWith(@"watson.microsoft.com"),
+            Domain.EndsWith(@"update.microsoft.com"),
+            Domain.EndsWith(@"be.cosmos11.osdinfra.net"),
+            Domain.EndsWith(@"cosmos11.osdinfra.net"),
+            Domain.EndsWith(@"management.core.windows.net"),
+            Domain.EndsWith(@"database.windows.net"),
+            Domain.EndsWith(@"blob.core.windows.net"),
+            Domain.EndsWith(@"microsoftonline.net"),
+            Domain.EndsWith(@"login.windows-ppe.net"),
+            Domain.EndsWith(@"login.windows.net"),
+            Domain.EndsWith(@"graph.windows.net"),
+            Domain.EndsWith(@"accounts.accesscontrol.windows.net"),
+            Domain.EndsWith(@".trafficmanager.net"),
+            Domain.EndsWith(@"workflow.windows.net"),
+            Domain.EndsWith(@"outlook.office365.com"),
+            Domain.EndsWith(@"sqm.microsoft.com"),
+            Domain.EndsWith(@".dprod.msft.net"),
+            Domain.EndsWith(@"blob.core.usgovcloudapi.net"),
+            Domain.EndsWith(@".microsoftonline.com"),
+            Domain.EndsWith(@"smtp.office365.com"),
+            Domain.EndsWith(@".outlook.com"),
+            Domain.EndsWith(@"syncservice.ccsctp.com"),
+            Domain.EndsWith(@".ad.msft.net"),
+            Domain.EndsWith(@".update.microsoft.com"),
+            Domain.EndsWith(@".akadns.net"),
+            Domain.Contains(@".bing.com")
+        ) AND NOT ANY(
+            ImagePath.StartsWith(@"c:\program files\common files\microsoft shared\web server extensions\16\bin\owstimer.exe", false, null),
+            ImagePath.StartsWith(@"c:\windows\system32\inetsrv\w3wp.exe", false, null),
+////            Process == @"c:\windows\system32\wsmprovhost.exe", // DO NOT WHITELIST
+//            // ICM 5164091: only proc names are available in some cases
+            ImagePath.StartsWith("owstimer.exe", false, null),
+////            Process == "powershell.exe", // DO NOT WHITELIST
+            ImagePath.StartsWith("w3wp.exe", false, null)
+////            Process == "wsmprovhost.exe" // DO NOT WHITELIST
+    );
+
+// whitelist of procs that are allowed to exfil to non-MSFT domains
+exfilProcsNonMsft =
+    SELECT *
+    FROM exfilProcs
+    WHERE (MsftIP == NULL)
+        AND NOT ANY(
+            ImagePath.StartsWith(@"c:\windows\system32\inetsrv\w3wp.exe", false, null),
+            ImagePath.StartsWith(@"c:\program files\common files\microsoft shared\web server extensions\16\bin\owstimer.exe", false, null),
+            ImagePath.StartsWith(@"c:\windows\system32\svchost.exe", false, null),
+            // ICM 5164091: only proc names are available in some cases
+            ImagePath.StartsWith(@"w3wp.exe", false, null)
+        );
+
+exfilProcsSelected =
+    SELECT * FROM exfilProcsMsft
+    UNION ALL
+    SELECT * FROM exfilProcsNonMsft;
+
+OUTPUT exfilProcsSelected
+TO SSTREAM "/local/shuywang/AllSuspiciousExfilProcesses.ss"
+WITH STREAMEXPIRY "100";
